@@ -15,7 +15,7 @@ from . import checklist_router, coverage_router, operations_router, workflow
 from .auth import current_staff, hash_password, require, token_for, verify_password
 from .db import MODEL_DIR, audit, cache, connect, migrate
 from .schemas import (AlertStatus, Credentials, Handover, NewObservation, Receipt, Resident,
-                      Review, Role, Signals)
+                      Review, Revocation, Role, Signals)
 
 log = logging.getLogger('uvicorn.error')
 DUMMY_HASH = hash_password('unused-staff-account')
@@ -107,7 +107,7 @@ def residents(staff=Depends(current_staff), q: str = Query('', max_length=100)):
     with connect() as db:
         return db.execute(
             '''SELECT r.*, a.id AS alert_id, a.priority, a.status AS alert_status,
-                      (SELECT count(*) FROM observations o WHERE o.resident_id=r.id) AS observation_count
+                      (SELECT count(*) FROM observations o WHERE o.resident_id=r.id AND o.status <> 'revoked') AS observation_count
                FROM residents r LEFT JOIN alerts a ON a.resident_id=r.id AND a.status<>'closed'
                WHERE concat_ws(' ',r.code,r.name,r.unit,r.room) ILIKE %s ORDER BY r.unit,r.room''',
             (f'%{q}%',),
@@ -120,15 +120,30 @@ def register(data: Resident, staff=Depends(lead)):
         return workflow.register(db, data, staff['id'])
 
 
+REVOCATION_COLUMNS = '''SELECT v.*, s.name AS revoked_by_name FROM observation_revocations v
+                        JOIN staff s ON s.id=v.revoked_by'''
+
+
 @app.get('/observations')
-def observations(staff=Depends(current_staff), resident_id: int | None = None):
+def observations(staff=Depends(current_staff), resident_id: int | None = None,
+                 include_revoked: bool = False):
     with connect() as db:
-        return db.execute(
-            '''SELECT o.*,r.name AS resident_name,r.room,s.name AS author_name FROM observations o
+        rows = db.execute(
+            '''SELECT o.*,r.name AS resident_name,r.room,s.name AS author_name,
+                      v.reason AS revocation_reason,v.created_at AS revoked_at,vs.name AS revoked_by_name,
+                      v.remaining_observations,v.previous_status AS previous_observation_status,
+                      v.superseded_handover_id
+               FROM observations o
                JOIN residents r ON r.id=o.resident_id JOIN staff s ON s.id=o.staff_id
-               WHERE (%s::bigint IS NULL OR o.resident_id=%s) ORDER BY o.id DESC LIMIT 150''',
-            (resident_id, resident_id),
+               LEFT JOIN observation_revocations v ON v.observation_id=o.id
+               LEFT JOIN staff vs ON vs.id=v.revoked_by
+               WHERE (%s::bigint IS NULL OR o.resident_id=%s) AND (%s OR o.status <> 'revoked')
+               ORDER BY o.id DESC LIMIT 150''',
+            (resident_id, resident_id, include_revoked),
         ).fetchall()
+        revocations = db.execute(REVOCATION_COLUMNS + ' ORDER BY v.id DESC LIMIT 150').fetchall() \
+            if include_revoked else []
+        return {'items': rows, 'revocations': revocations}
 
 
 @app.post('/observations', status_code=201)
@@ -141,6 +156,14 @@ def observe(data: NewObservation, staff=Depends(writers)):
 def supplement(observation_id: int, data: Signals, staff=Depends(writers)):
     with connect() as db:
         return workflow.supplement(db, observation_id, data, staff['id'])
+
+
+@app.post('/observations/{observation_id}/revoke')
+def revoke_observation(observation_id: int, data: Revocation, staff=Depends(lead)):
+    with connect() as db:
+        observation, revocation, alert = workflow.revoke_observation(
+            db, observation_id, data.reason, staff['id'])
+        return {'observation': observation, 'revocation': revocation, 'alert': alert}
 
 
 @app.get('/alerts')
@@ -169,8 +192,18 @@ def alert_detail(alert_id: int, staff=Depends(current_staff)):
             raise HTTPException(404, '告警不存在')
         response = workflow.active_response(db, alert_id)
         alert['active_response_id'] = response['id'] if response else None
-        alert['observations'] = db.execute('SELECT * FROM observations WHERE alert_id=%s ORDER BY id DESC',
-                                           (alert_id,)).fetchall()
+        alert['observations'] = db.execute(
+            '''SELECT o.*,v.reason AS revocation_reason,v.created_at AS revoked_at,
+                      vs.name AS revoked_by_name,v.remaining_observations
+               FROM observations o
+               LEFT JOIN observation_revocations v ON v.observation_id=o.id
+               LEFT JOIN staff vs ON vs.id=v.revoked_by
+               WHERE o.alert_id=%s ORDER BY o.id DESC''', (alert_id,)).fetchall()
+        alert['revocations'] = db.execute(
+            '''SELECT v.*,s.name AS revoked_by_name,o.ref AS observation_ref
+               FROM observation_revocations v JOIN staff s ON s.id=v.revoked_by
+               JOIN observations o ON o.id=v.observation_id
+               WHERE v.alert_id=%s ORDER BY v.id DESC''', (alert_id,)).fetchall()
         model = MODEL_DIR / 'priority-model.json'
         alert['model'] = json.loads(model.read_text()) if model.exists() else None
         return alert

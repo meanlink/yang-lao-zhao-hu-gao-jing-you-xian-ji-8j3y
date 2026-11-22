@@ -219,3 +219,16 @@ meter::-webkit-meter-optimum-value { background:var(--accent); }
 .ops-timeline p{margin:4px 0;overflow-wrap:anywhere}
 @media(max-width:1050px){.ops-layout{grid-template-columns:1fr}}
 @media(max-width:560px){.ops-item-head{flex-wrap:wrap}.ops-item{padding:13px}.ops-create .ops-action{padding:13px}}
+
+/* 观察记错撤销：留档样式与撤销台账 */
+.side-stack { display:flex; flex-direction:column; gap:12px; min-width:0; }
+.journal-entry.is-revoked { background:var(--wall); opacity:.92; }
+.journal-entry.is-revoked h3 { text-decoration:line-through; text-decoration-color:var(--ochre); }
+.danger-link { color:var(--ochre); }
+.revoke-form { margin-top:10px; padding:11px 12px; background:var(--warning); border-left:3px solid var(--ochre); border-radius:4px; }
+.revoke-form textarea { min-height:74px; }
+.revoke-form .actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.obs-revoked { opacity:.78; }
+.obs-revoked strong { text-decoration:line-through; text-decoration-color:var(--ochre); }
+.revocation-ledger .revocation-row { padding:9px 4px; border-top:1px solid var(--edge); }
+.revocation-ledger .revocation-row p { margin:5px 0; }

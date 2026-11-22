@@ -11,6 +11,7 @@ export async function handoversPage(state) {
     ${(r.snapshot.response_checks || []).map(check=>`<div class="note good"><strong>处置核对 · ${escape(check.assignee)} · ${check.verified_count} 项已核对</strong>
     <p>${escape(check.finish_note)}</p><a class="text-link" href="#checks/${check.response_id}">查看核对凭据</a></div>`).join('')}
     <details><summary>关联观察与告警版本</summary><p>告警 #${r.alert_id} · 版本 ${r.alert_revision}</p><ul>${r.snapshot.observations.map(obs=>`<li>${escape(obs.ref)}</li>`).join('')}</ul></details>
+    ${r.status==='superseded' ? '<div class="note warn"><strong>旧待签单已作废</strong><p>撤销记错观察后按剩余观察重算，本单保留当时快照仅供查阅，不能再签收。</p></div>' : ''}
     ${r.status==='signed' ? `<div class="note good"><strong>${escape(r.signed_name)} · ${time(r.signed_at)}</strong><p>${escape(r.receipt_note)}</p><a class="text-link" href="#followups/${r.id}">查看或安排交班后复查</a></div>` : ''}
     ${signable ? `<form data-do="sign" data-id="${r.id}" class="stack sign-form"><label>签收说明<input name="receipt_note" minlength="3" maxlength="600" required placeholder="说明已接续事项和下一步"></label>${button('确认签收')}</form>` : ''}</article>`;
   return `${heading('交班记录','本班交接清单','交班单保留当时的复核版本与观察，接班员签收后完成本轮交接。')}

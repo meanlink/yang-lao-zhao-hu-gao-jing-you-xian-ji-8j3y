@@ -67,6 +67,14 @@ const actions = {
     state.supplement = null;
     return result.status === 'incomplete' ? '已保存补录，仍有字段待核对' : '补录完成，已排队分级';
   },
+  async revokeObservation(form,data) {
+    const result = await api(`/observations/${form.dataset.id}/revoke`,'POST',{reason:data.get('reason')});
+    state.revoke = null;
+    const alert = result.alert;
+    return alert.status === 'closed'
+      ? '观察已撤销留档，无剩余观察，告警已结束'
+      : `观察已撤销留档，告警已按剩余观察重算为「${alert.status}」`;
+  },
   async review(form,data) {
     await api(`/alerts/${form.dataset.id}/review`,'POST',{revision:Number(form.dataset.revision),priority:Number(data.get('priority')),note:data.get('note')});
     return '告警已复核，可以提交交班';
@@ -116,11 +124,14 @@ app.addEventListener('click',event=>{
     history.replaceState(null,'','#alerts');
   }
   if (action === 'unit') state.unit = value;
-  if (action === 'supplement') state.supplement = Number(value);
+  if (action === 'supplement') { state.supplement = Number(value); state.revoke = null; }
   if (action === 'cancel-supplement') state.supplement = null;
+  if (action === 'revoke') { state.revoke = Number(value); state.supplement = null; }
+  if (action === 'cancel-revoke') state.revoke = null;
   if (action === 'resident-observations') {
     state.observationResident = value;
     state.supplement = null;
+    state.revoke = null;
     location.hash = '#observations';
     return;
   }
@@ -128,7 +139,7 @@ app.addEventListener('click',event=>{
 });
 app.addEventListener('change',event=>{
   const node = event.target;
-  if (node.dataset.change === 'observation-resident') { state.observationResident = node.value; state.supplement = null; render(); }
+  if (node.dataset.change === 'observation-resident') { state.observationResident = node.value; state.supplement = null; state.revoke = null; render(); }
   if (node.dataset.change === 'include-closed') { state.includeClosed = node.checked; render(); }
 });
 window.addEventListener('hashchange',()=>{ window.scrollTo(0,0); render(); });

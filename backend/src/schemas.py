@@ -84,3 +84,7 @@ class Handover(Revision):
 
 class Receipt(Input):
     receipt_note: Note
+
+
+class Revocation(Input):
+    reason: Note

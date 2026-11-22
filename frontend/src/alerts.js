@@ -28,12 +28,17 @@ function detailBlock(row, canReview) {
     <h3>提交交班</h3><label>接收班次<select name="target_shift">${Object.entries(SHIFTS).map(([key,val])=>`<option value="${key}" ${key === 'night' ? 'selected' : ''}>${val}</option>`).join('')}</select></label>
     <label>接续事项<input name="next_action" minlength="3" maxlength="600" required placeholder="填写下一班需要确认的事项"></label>${button('提交交班')}</form>`;
   return `${panel(`${row.room} · ${row.resident_name}`, `${row.code} · 告警 #${row.id} · 版本 ${row.revision}`)}
-    <div class="detail-pad"><div class="data-line">${priority(row.priority)}${status(row.status)}</div>
+    <div class="detail-pad"><div class="data-line">${priority(row.priority)}${status(row.status)}${row.closed_reason ? pill(row.closed_reason === 'revoked' ? '撤销后结束' : '签收归档', 'neutral') : ''}</div>
     <div class="ops-links"><a class="secondary" href="#responses/${row.id}">照护响应派单</a><a class="secondary" href="#contacts/${row.id}">家属联络留痕</a></div>
     ${row.active_response_id ? '<div class="note warn">本条告警还有在办的照护响应任务，完成或撤销后方可交班。</div>' : ''}
     ${row.review_note ? `<div class="review-memo"><strong>${escape(row.reviewer_name)} · ${time(row.reviewed_at)}</strong><p>${escape(row.review_note)}</p></div>` : ''}
     ${action}${scored ? resultBlock(scored,row.priority) : ''}
-    <section class="evidence-list"><h3>关联观察</h3>${row.observations.map(obs => `<div>${status(obs.status,OBSERVATIONS)} <strong>${escape(obs.ref)}</strong><p>${escape(obs.author_note)}</p></div>`).join('')}</section></div>`;
+    ${(row.revocations || []).length ? `<section class="evidence-list revocation-ledger"><h3>撤销留档与重算结果</h3>${row.revocations.map(v => `<article class="revocation-row">
+      <div class="data-line"><span class="pill warn">已撤销</span><strong>${escape(v.observation_ref)}</strong><span>${time(v.created_at)} · ${escape(v.revoked_by_name)}</span></div>
+      <p>${escape(v.reason)}</p>
+      <div class="data-line"><span>撤销前 ${OBSERVATIONS[v.previous_status] || v.previous_status}${v.previous_priority ? ` · 等级 ${v.previous_priority}` : ''}</span><span>剩余观察 ${v.remaining_observations} 条</span>${v.superseded_handover_id ? `<a href="#handovers">旧待签单 #${v.superseded_handover_id} 已作废</a>` : ''}</div>
+    </article>`).join('')}</section>` : ''}
+    <section class="evidence-list"><h3>关联观察</h3>${row.observations.map(obs => `<div class="${obs.status === 'revoked' ? 'obs-revoked' : ''}">${status(obs.status,OBSERVATIONS)} <strong>${escape(obs.ref)}</strong><p>${escape(obs.author_note)}</p>${obs.status === 'revoked' ? `<p class="missing">撤销缘由：${escape(obs.revocation_reason)}（${escape(obs.revoked_by_name)} · ${time(obs.revoked_at)}）</p>` : ''}</div>`).join('')}</section></div>`;
 }
 
 export async function alertsPage(state, activeId) {

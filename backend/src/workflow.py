@@ -34,26 +34,42 @@ def lock_alert(db, alert_id):
 
 
 def revoke_handover(db, alert_id, actor):
+    # 调用方已持有住户行锁；这里先锁定交班单行，保证与签收事务「住户行 → 交班单行」同序，避免死锁。
+    db.execute("SELECT id FROM handovers WHERE alert_id=%s AND status='open' FOR UPDATE", (alert_id,)).fetchall()
     replaced = db.execute(
         "UPDATE handovers SET status='superseded' WHERE alert_id=%s AND status='open' RETURNING id",
         (alert_id,),
     ).fetchone()
     if replaced:
         audit(db, actor, 'handover_superseded_by_observation', 'handover', replaced['id'])
+    return replaced['id'] if replaced else None
 
 
 def recompute_status(db, alert_id, *, new_input=False):
-    has_missing, queued = db.execute(
+    has_missing, queued, remaining, top_priority = db.execute(
         """SELECT COALESCE(bool_or(status='incomplete'), false) AS missing,
-                  COALESCE(bool_or(status='queued'), false) AS queued
+                  COALESCE(bool_or(status='queued'), false) AS queued,
+                  count(*) FILTER (WHERE status <> 'revoked') AS remaining,
+                  max((result->>'candidate')::int) FILTER (WHERE status='scored') AS top_priority
            FROM observations WHERE alert_id=%s""", (alert_id,),
     ).fetchone().values()
+    if remaining == 0:
+        # 无剩余观察则结束告警；closed 归档保留撤销前的等级，从未分级时回落为最低级。
+        db.execute(
+            '''UPDATE alerts SET status='closed', priority=COALESCE(priority, 1),
+                      closed_reason='revoked', revision=revision+%s, updated_at=now(),
+                      review_note=NULL, reviewed_by=NULL, reviewed_at=NULL WHERE id=%s''',
+            (int(new_input), alert_id),
+        )
+        return Status.CLOSED
     stage = Status.INCOMPLETE if has_missing else Status.EVALUATING if queued else Status.REVIEW
+    # 等级按剩余已评分观察重新取最高；撤销唯一的已评分观察后回到未分级。
     db.execute(
-        '''UPDATE alerts SET status=%s, revision=revision+%s, updated_at=now(),
+        '''UPDATE alerts SET status=%s, priority=%s, revision=revision+%s, updated_at=now(),
                   review_note=NULL, reviewed_by=NULL, reviewed_at=NULL WHERE id=%s''',
-        (stage, int(new_input), alert_id),
+        (stage, top_priority, int(new_input), alert_id),
     )
+    return stage
 
 
 def enter_observation(db, data, actor):
@@ -108,11 +124,54 @@ def supplement(db, observation_id, data, actor):
     return updated
 
 
+def revoke_observation(db, observation_id, reason, actor):
+    entry = db.execute('SELECT alert_id FROM observations WHERE id=%s', (observation_id,)).fetchone()
+    if entry is None:
+        raise HTTPException(404, '观察不存在')
+    case = lock_alert(db, entry['alert_id'])
+    # 撤销重试：已撤销则原样返回，不重复留痕（含撤销后告警已关闭的情形）。
+    existing = db.execute('SELECT * FROM observation_revocations WHERE observation_id=%s',
+                          (observation_id,)).fetchone()
+    if existing is not None:
+        observation = db.execute('SELECT * FROM observations WHERE id=%s', (observation_id,)).fetchone()
+        case = db.execute('SELECT * FROM alerts WHERE id=%s', (case['id'],)).fetchone()
+        return observation, existing, case
+    if case['status'] == Status.CLOSED:
+        raise HTTPException(409, '告警已交接归档，已签交班仍按原件查阅，观察不能撤销')
+    row = db.execute('SELECT * FROM observations WHERE id=%s FOR UPDATE', (observation_id,)).fetchone()
+    if row['status'] == 'revoked':
+        raise HTTPException(409, '观察已撤销，请刷新工作台')
+    previous_status = row['status']
+    superseded_handover_id = revoke_handover(db, case['id'], actor)
+    db.execute("UPDATE observations SET status='revoked' WHERE id=%s", (observation_id,))
+    remaining = db.execute(
+        "SELECT count(*) AS n FROM observations WHERE alert_id=%s AND status <> 'revoked'",
+        (case['id'],),
+    ).fetchone()['n']
+    stage = recompute_status(db, case['id'], new_input=True)
+    revocation = db.execute(
+        '''INSERT INTO observation_revocations(observation_id,alert_id,revoked_by,reason,previous_status,
+                  previous_priority,remaining_observations,superseded_handover_id)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *''',
+        (observation_id, case['id'], actor, reason, previous_status, case['priority'],
+         remaining, superseded_handover_id),
+    ).fetchone()
+    audit(db, actor, 'observation_revoked', 'observation', observation_id,
+          alert_id=case['id'], reason=reason, previous_status=previous_status,
+          remaining_observations=remaining, superseded_handover_id=superseded_handover_id,
+          alert_status=stage)
+    if superseded_handover_id:
+        audit(db, actor, 'handover_superseded_by_revocation', 'handover', superseded_handover_id,
+              alert_id=case['id'], observation_id=observation_id)
+    refreshed = db.execute('SELECT * FROM alerts WHERE id=%s', (case['id'],)).fetchone()
+    return db.execute('SELECT * FROM observations WHERE id=%s', (observation_id,)).fetchone(), revocation, refreshed
+
+
 def review(db, alert_id, data, actor):
     case = lock_alert(db, alert_id)
     if case['status'] != Status.REVIEW or case['revision'] != data.revision:
         raise HTTPException(409, '告警尚不能复核或观察已更新，请刷新队列')
-    if data.priority < case['priority']:
+    if case['priority'] is not None and data.priority < case['priority']:
         raise HTTPException(409, '未交班告警的当前优先级只能保留或上调')
     result = db.execute(
         """UPDATE alerts SET status='confirmed', priority=%s, reviewed_by=%s,
@@ -145,8 +204,9 @@ def dispatch(db, alert_id, data, actor):
         raise HTTPException(409, '需先复核当前版本才可交班')
     if active_response(db, alert_id):
         raise HTTPException(409, '先完成或撤销本条告警的照护响应任务，再提交交班')
-    observations = db.execute('SELECT ref, result FROM observations WHERE alert_id=%s ORDER BY id',
-                              (alert_id,)).fetchall()
+    observations = db.execute(
+        "SELECT ref, result FROM observations WHERE alert_id=%s AND status <> 'revoked' ORDER BY id",
+        (alert_id,)).fetchall()
     resident = db.execute('SELECT code,name,room,unit FROM residents WHERE id=%s',
                           (case['resident_id'],)).fetchone()
     snapshot = {'resident': resident, 'priority': case['priority'], 'review_note': case['review_note'],
@@ -182,7 +242,8 @@ def sign(db, handover_id, data, actor):
         """UPDATE handovers SET status='signed',signed_by=%s,signed_at=now(),receipt_note=%s
            WHERE id=%s RETURNING *""", (actor, data.receipt_note, handover_id),
     ).fetchone()
-    db.execute("UPDATE alerts SET status='closed',updated_at=now() WHERE id=%s", (case['id'],))
+    db.execute("UPDATE alerts SET status='closed',closed_reason='signed',updated_at=now() WHERE id=%s",
+               (case['id'],))
     audit(db, actor, 'handover_signed', 'handover', handover_id, alert_id=case['id'])
     return result
 

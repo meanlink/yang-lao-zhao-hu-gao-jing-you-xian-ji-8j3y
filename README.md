@@ -61,6 +61,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 | 路径 | 职责 |
 |---|---|
 | `backend/migrations/001_care.sql` | 领域表、外键、部分唯一索引及状态约束 |
+| `backend/migrations/005_observation_revocation.sql` | 观察撤销留档表、`revoked` 状态与告警关闭来源 |
 | `backend/src/schemas.py`、`workflow.py`、`main.py` | 校验、状态转换及 FastAPI 路由 |
 | `backend/src/auth.py` | PBKDF2 密码、JWT 和角色依赖 |
 | `backend/src/priority_model.py`、`worker.py` | 拟合、计算解释、持久化评分与心跳 |
@@ -91,3 +92,16 @@ docker compose exec -T backend python -m scripts.seed_demo
 首次种子运行会为康复翼一层创建 115-A 沈慧芳的告警和唐宁的 8 小时覆盖。唐宁使用 `relief@zhaohui.local` 和 `zhaohui-demo` 登录。覆盖到期后，值班长可登记新班次。再次执行 seed 会保留既有班次和业务记录。未登记过覆盖的区域可继续使用原有派单流程，值班长可为任何在办响应添加核对清单。
 
 新增模型位于 `backend/migrations/003_shift_coverage.sql` 和 `004_response_checks.sql`。`coverage*.py`、`checklist*.py` 负责规则、请求校验及 API。原生前端的值班覆盖、可用人员选择和核对工作台分别由 `shiftCoverage.js`、`coverageDispatch.js`、`responseChecks.js` 和 `checklistItems.js` 提供。
+
+## 巡房观察记错撤销
+
+值班长在工作台发现巡房观察记错时，可对该观察登记撤销并填写缘由，系统按下列规则处理：
+
+1. **原观察留档**：观察不会物理删除，而是转为 `revoked` 状态，原信号、评分结果与录入信息保留；撤销缘由、操作人、撤销前状态、当时等级、剩余观察条数和被作废的交班单写入 `observation_revocations`，并同步写入审计事件。
+2. **告警按剩余观察重算**：撤销后按剩余观察重新确定阶段与等级——还有待补观察为「待补观察」，有排队观察为「分级中」，全部评分为「待复核」；等级取剩余已评分观察候选等级的最高值。一条剩余观察都没有时结束告警（`closed`，`closed_reason='revoked'`），该住户随后可开启新一轮告警。
+3. **排队观察不再计分**：撤销时仍处于排队（`queued`）或待补（`incomplete`）的观察不会进入评分；worker 只领取剩余的完整观察。
+4. **待签交班单作废、已签交班按原件查阅**：撤销时若存在待签收交班单，其状态置为 `superseded` 并在撤销记录中关联，旧快照仍可查阅但不能再签收；告警有剩余观察时回到待复核，需重新复核与交班。已经接班员签收归档的告警（`closed_reason='signed'`）不允许撤销观察，已签交班始终按原件查阅。
+5. **并发与重试**：撤销与签收都先锁住户行再锁交班单行，锁序一致；并发时以先办成的为准，后到一方收到 409 且状态保持自洽。同一条观察的撤销重试返回原撤销记录，不重复留痕、不重复审计。
+6. **工作台可查**：观察页默认隐藏已撤销记录，`include_revoked=true` 可查看撤销台账与每条留档；告警详情给出「撤销留档与重算结果」区，交班归档标注旧单作废原因。仅值班长角色可执行撤销。
+
+迁移与后端规则在 `backend/migrations/005_observation_revocation.sql` 与 `backend/src/workflow.py` 的 `revoke_observation`、`recompute_status`；请求模型为 `schemas.py` 的 `Revocation`，端点为 `POST /observations/{id}/revoke`。原生前端入口在 `observations.js`（撤销表单与台账）、`alerts.js`（重算结果与留档）和 `handovers.js`（旧单作废状态）。对应验收测试见 `backend/tests/`。

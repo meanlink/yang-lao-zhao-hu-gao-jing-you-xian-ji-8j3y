@@ -1,6 +1,6 @@
 export const ROLES = {carer:'照护员', lead:'值班长', receiver:'接班员'};
 export const ALERTS = {evaluating:'分级中', incomplete:'待补观察', review:'待复核', confirmed:'已复核', handover:'待接班签收', closed:'已交接'};
-export const OBSERVATIONS = {incomplete:'待补', queued:'分级中', scored:'已分级'};
+export const OBSERVATIONS = {incomplete:'待补', queued:'分级中', scored:'已分级', revoked:'已撤销'};
 export const HANDOVERS = {open:'待签收', signed:'已签收', superseded:'已作废'};
 export const SHIFTS = {day:'早班', swing:'中班', night:'晚班'};
 export const PRIORITIES = {1:'常规跟进', 2:'尽快跟进', 3:'优先处理'};
@@ -17,7 +17,7 @@ export function time(value) {
 export function pill(label, tone='neutral') { return `<span class="pill ${tone}">${escape(label)}</span>`; }
 export function priority(level) { return level ? pill(PRIORITIES[level], `level-${level}`) : pill('未分级'); }
 export function status(value, labels=ALERTS) {
-  const tone = ['incomplete','superseded'].includes(value) ? 'warn' : ['confirmed','signed','closed','scored'].includes(value) ? 'good' : 'neutral';
+  const tone = ['incomplete','superseded','revoked'].includes(value) ? 'warn' : ['confirmed','signed','closed','scored'].includes(value) ? 'good' : 'neutral';
   return pill(labels[value] || value, tone);
 }
 export function empty(message) { return `<div class="empty">${escape(message)}</div>`; }
